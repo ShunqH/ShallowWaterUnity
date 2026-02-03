@@ -14,9 +14,11 @@ Key features include:
 
 ## Demo Video
 
-YouTuBe: 
+Bilibili: https://www.bilibili.com/video/BV1ZoFVzDE2Q/
 
-Bilibili: 
+YouTuBe
+- Waves on the beach: https://youtu.be/VkTo75j1LR8
+- Waves with Hills: https://youtu.be/4MepGrY8EnU
 
 ---
 
@@ -29,7 +31,7 @@ Bilibili:
   │   ├─ Scripts/ # C# scripts
   │   │   └──ShallowWaterCPUControl.cs # Main simulation control, buffer management
   │   └─ Shaders/ # Compute and rendering shaders
-  │       ├──ShallowWaterSim.compute # Main shallow water solver (HLLC Reimann sovler, Forward Euler method)
+  │       ├──ShallowWaterSim.compute # Main shallow water solver (HLLC Riemann sovler, Forward Euler method)
   │       ├──WaterHeight.shader # Water surface render shader
   │       └──SeaBed.shader # Seabed render shader
   └─ README.md # Project description
