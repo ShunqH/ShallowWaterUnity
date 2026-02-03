@@ -1,0 +1,258 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel kernelUpdateBDX
+#pragma kernel kernelUpdateBDZ
+#pragma kernel kernelUpdateF
+#pragma kernel kernelUpdateG
+#pragma kernel kernelUpdateU
+
+
+cbuffer SimulationParams : register(b0)
+{
+    uint NX, NZ, NGhost;
+    uint lenx, lenz, lenArr; 
+    float eta0, g, hmin, dx, dz, bmin;
+    float injectWaveFreq, injectWaveAmp;
+    float tnow, dt, dtdx, dtdz; 
+}
+
+RWStructuredBuffer<float> h;
+RWStructuredBuffer<float> velx;
+RWStructuredBuffer<float> velz;
+StructuredBuffer<float> b;
+RWStructuredBuffer<float> eta;
+StructuredBuffer<float> parbx;
+StructuredBuffer<float> parbz;
+RWStructuredBuffer<float3> fHalf;
+RWStructuredBuffer<float3> gHalf;
+
+#define THREADS_PER_GROUP_X 16
+#define THREADS_PER_GROUP_Z 16
+#define PI 3.1415926535
+
+// ID conversions
+inline uint ID(uint i, uint j)
+{
+    return i * lenz + j;
+}
+inline uint IDFromFHalf(uint ii, uint jj, uint side)
+{
+    return ID(ii + NGhost + side - 1, jj + NGhost);
+}
+inline uint IDFromGHalf(uint ii, uint jj, uint side)
+{
+    return ID(ii + NGhost, jj + NGhost + side - 1);
+}
+inline uint FHalfID(uint i, uint j, uint side)
+{
+    return (i - NGhost + side) * NZ + (j - NGhost);
+}
+inline uint GHalfID(uint i, uint j, uint side)
+{
+    return (i - NGhost) * (NZ + 1) + (j - NGhost + side);
+}
+// Flux functions and seabed source
+inline float3 CalF(float h_, float velx_, float vely_)
+{
+    return float3(
+        h_ * velx_,
+        h_ * velx_ * velx_ + 0.5 * g * h_ * h_,
+        h_ * velx_ * vely_
+    );
+}
+inline float3 CalG(float h_, float velx_, float vely_)
+{
+    return float3(
+        h_ * vely_,
+        h_ * velx_ * vely_,
+        h_ * vely_ * vely_ + 0.5 * g * h_ * h_
+    );
+}
+inline float3 CalQBed(uint id)
+{
+    return float3(
+        0,
+        -g * h[id] * parbx[id],
+        -g * h[id] * parbz[id]
+    );
+}
+
+[numthreads(THREADS_PER_GROUP_X, THREADS_PER_GROUP_Z, 1)]
+// loop 0 <= i < NGhost; 0 <= j < lenz. 
+void kernelUpdateBDX(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x; 
+    uint j = tid.y; 
+    if (i >= NGhost || j >= lenz)
+        return;
+    uint idnow = ID(i, j);
+    h[idnow] = eta0 + injectWaveAmp * cos(2 * PI * injectWaveFreq * tnow);
+    velx[idnow] = (h[idnow] - bmin - eta0) * sqrt(g/eta0);
+    // velx[idnow] = 0;
+    velz[idnow] = 0; 
+    h[ID(NX + NGhost + i, j)] = h[ID(NGhost + NX - 1, j)];
+    velx[ID(NX + NGhost + i, j)] = velx[ID(NGhost + NX - 1, j)];
+    velz[ID(NX + NGhost + i, j)] = velz[ID(NGhost + NX - 1, j)];
+    return; 
+}
+
+[numthreads(THREADS_PER_GROUP_X, THREADS_PER_GROUP_Z, 1)]
+// loop 0 <= i < lenx; 0 <= j < NGhost. 
+void kernelUpdateBDZ(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint j = tid.y;
+    if (i >= lenx || j >= NGhost)
+        return;
+    //h[ID(i, j)] = 1.5;
+    h[ID(i, j)] = h[ID(i, NGhost)];
+    velx[ID(i, j)] = velx[ID(i, NGhost)];
+    velz[ID(i, j)] = velz[ID(i, NGhost)];
+    h[ID(i, NZ + NGhost + j)] = h[ID(i, NGhost + NZ - 1)];
+    velx[ID(i, NZ + NGhost + j)] = velx[ID(i, NGhost + NZ - 1)];
+    velz[ID(i, NZ + NGhost + j)] = velz[ID(i, NGhost + NZ - 1)];
+    return; 
+}
+
+[numthreads(THREADS_PER_GROUP_X, THREADS_PER_GROUP_Z, 1)]
+// loop 0 <= ii < NX+1; 0 <= jj < NZ. 
+void kernelUpdateF(uint3 tid : SV_DispatchThreadID)
+{
+    uint ii = tid.x;
+    uint jj = tid.y;
+    if (ii >= NX + 1 || jj >= NZ)
+        return;
+    uint idnow = ii * (NZ) + jj;
+    float hl = h[IDFromFHalf(ii, jj, 0)];
+    float hr = h[IDFromFHalf(ii, jj, 1)];
+    float ul = velx[IDFromFHalf(ii, jj, 0)];
+    float ur = velx[IDFromFHalf(ii, jj, 1)];
+    float vl = velz[IDFromFHalf(ii, jj, 0)];
+    float vr = velz[IDFromFHalf(ii, jj, 1)];
+    float cl = sqrt(g * hl);
+    float cr = sqrt(g * hr);
+    float hs = (1 / g) * (0.5 * (cl + cr) + 0.25 * (ul - ur)) * (0.5 * (cl + cr) + 0.25 * (ul - ur));
+    float ql = (hs <= hl) ? 1 : sqrt(0.5 * (hs + hl) * hs / (hl * hl));
+    float sl = ul - cl * ql;
+    float qr = (hs <= hr) ? 1 : sqrt(0.5 * (hs + hr) * hs / (hr * hr));
+    float sr = ur + cr * qr;
+    float3 fL = CalF(hl, ul, vl);
+    if (sl >= 0)
+    {
+        fHalf[idnow] = fL; 
+        return; 
+    }
+    float3 fR = CalF(hr, ur, vr);
+    if (sr <= 0)
+    {
+        fHalf[idnow] = fR;
+        return;
+    }
+    float ss = (sl * hr * (ur - sr) - sr * hl * (ul - sl)) / (hr * (ur - sr) - hl * (ul - sl));
+    float hsl = hl * (sl - ul) / (sl - ss);
+    if ((sl <= 0) && (ss >= 0))
+    {
+        fHalf[idnow] = float3( fL.x + sl * (hsl - hl),
+                               fL.y + sl * (hsl * ss - hl * ul),
+                               fL.z + sl * (hsl * vl - hl * vl) );
+        return;
+    }
+    float hsr = hr * (sr - ur) / (sr - ss);
+    if ((ss <= 0) && (sr >= 0))
+    {
+        fHalf[idnow] = float3( fR.x + sr * (hsr - hr),
+                               fR.y + sr * (hsr * ss - hr * ur),
+                               fR.z + sr * (hsr * vr - hr * vr) ); 
+        return;
+    }
+    return; 
+}
+
+[numthreads(THREADS_PER_GROUP_X, THREADS_PER_GROUP_Z, 1)]
+// loop 0 <= ii < NX; 0 <= jj < NZ+1. 
+void kernelUpdateG(uint3 tid : SV_DispatchThreadID)
+{
+    uint ii = tid.x;
+    uint jj = tid.y;
+    if (ii >= NX || jj >= NZ + 1)
+        return;
+    uint idnow = ii * (NZ + 1) + jj;
+    float hl = h[IDFromGHalf(ii, jj, 0)];
+    float hr = h[IDFromGHalf(ii, jj, 1)];
+    float ul = velx[IDFromGHalf(ii, jj, 0)];
+    float ur = velx[IDFromGHalf(ii, jj, 1)];
+    float vl = velz[IDFromGHalf(ii, jj, 0)];
+    float vr = velz[IDFromGHalf(ii, jj, 1)];
+    float cl = sqrt(g * hl);
+    float cr = sqrt(g * hr);
+    float hs = (1 / g) * (0.5 * (cl + cr) + 0.25 * (vl - vr)) * (0.5 * (cl + cr) + 0.25 * (vl - vr));
+    float ql = (hs <= hl) ? 1 : sqrt(0.5 * (hs + hl) * hs / (hl * hl));
+    float sl = vl - cl * ql;
+    float qr = (hs <= hr) ? 1 : sqrt(0.5 * (hs + hr) * hs / (hr * hr));
+    float sr = vr + cr * qr;
+    
+    float3 gL = CalG(hl, ul, vl);
+    if (sl >= 0)
+    {
+        gHalf[idnow] = gL;
+        return;
+    }
+    float3 gR = CalG(hr, ur, vr);
+    if (sr <= 0)
+    {
+        gHalf[idnow] = gR;
+        return;
+    }
+    float ss = (sl * hr * (vr - sr) - sr * hl * (vl - sl)) / (hr * (vr - sr) - hl * (vl - sl));
+    float hsl = hl * (sl - vl) / (sl - ss);
+    if ((sl <= 0) && (ss >= 0))
+    {
+        gHalf[idnow] = float3( gL.x + sl * (hsl - hl),
+                               gL.y + sl * (hsl * ul - hl * ul),
+                               gL.z + sl * (hsl * ss - hl * vl) );
+        return;
+    }
+    float hsr = hr * (sr - vr) / (sr - ss);
+    if ((ss <= 0) && (sr >= 0))
+    {
+        gHalf[idnow] = float3( gR.x + sr * (hsr - hr),
+                               gR.y + sr * (hsr * ur - hr * ur),
+                               gR.z + sr * (hsr * ss - hr * vr) );
+        return;
+    }
+    return; 
+}
+
+[numthreads(THREADS_PER_GROUP_X, THREADS_PER_GROUP_Z, 1)]
+// loop NGhost <= i < NX+NGhost; NGhost <= j < NZ+NGhost. 
+void kernelUpdateU(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x + NGhost; 
+    uint j = tid.y + NGhost; 
+    if (i < NGhost || i >= NX + NGhost || j < NGhost || j >= NZ + NGhost)
+        return;
+    uint idnow = ID(i, j); 
+    float3 U = float3(h[idnow], h[idnow] * velx[idnow], h[idnow] * velz[idnow]); 
+    float3 QBed = CalQBed(idnow); 
+    U = U - (dtdx * (fHalf[FHalfID(i, j, 1)] - fHalf[FHalfID(i, j, 0)])
+             + dtdz * (gHalf[GHalfID(i, j, 1)] - gHalf[GHalfID(i, j, 0)]))
+          + dt * QBed; 
+    if (U.x > hmin)
+    {
+        h[idnow] = U.x;
+        velx[idnow] = U.y / h[idnow];
+        velz[idnow] = U.z / h[idnow];
+    }
+    else
+    {
+        h[idnow] = hmin;
+        velx[idnow] = 0.;
+        velz[idnow] = 0.;
+    }
+    // float cs = max(0, cmax - sqrt(g * h[idnow])) * 0.707;
+    // float cs = cmax; 
+    float cs = sqrt(g * h[idnow]);
+    velx[idnow] = clamp(velx[idnow], -cs, cs);
+    velz[idnow] = clamp(velz[idnow], -cs, cs);
+    eta[idnow] = h[idnow] + b[idnow]; 
+    return; 
+}
