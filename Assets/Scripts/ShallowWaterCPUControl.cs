@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.Net.Http;
 using Unity.VisualScripting;
 using UnityEngine;
@@ -18,6 +19,8 @@ public class ShallowWater_CPUSim : MonoBehaviour
     public float H0 = 1.0f;
     [Header("Simulation")]
     public float CFL = 0.5f;
+    public float maxTimePerFrame = 0.0166667f;
+    public int maxStepPerFrame = 100; 
     public float injectWaveFreq = 0.05f;
     public float injectWaveAmp = 0.2f; 
     [Header("Grid")]
@@ -57,6 +60,20 @@ public class ShallowWater_CPUSim : MonoBehaviour
     private ComputeBuffer fHalfBuffer, gHalfBuffer;
     private ComputeBuffer parbxBuffer, parbzBuffer;
 
+    private void Awake()
+    {
+        lenx = NX + NGhost * 2;
+        lenz = NZ + NGhost * 2;
+        lenArr = lenx * lenz;
+        CreateBuffer();
+        float[] init = new float[lenArr];
+        for (int i = 0; i < lenArr; ++i)
+            init[i] = H0;
+
+        etaBuffer.SetData(init);
+
+        WaterMaterial.SetBuffer("eta", etaBuffer);
+    }
 
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
@@ -65,7 +82,7 @@ public class ShallowWater_CPUSim : MonoBehaviour
         BuiltMesh();
         FindKernel();
         WaterMaterial.SetBuffer("eta", etaBuffer);
-        CreateBuffer();
+        //CreateBuffer();
         bindBuffer();
         SetBufferData();
         SetCBuffer();       // all constants.
@@ -75,21 +92,22 @@ public class ShallowWater_CPUSim : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        float tThisFrame = Time.deltaTime;
+        float tThisFrame = Mathf.Min(Time.deltaTime, maxTimePerFrame);
+        tThisFrame = Mathf.Max(tThisFrame, 1e-5f);
         dt = CFL * drmin / cmax;
         int step = Mathf.CeilToInt(tThisFrame / dt);
         dt = tThisFrame / step;
+        step = Mathf.Min(maxStepPerFrame, step); 
+
+        dtdx = dt / dx;
+        dtdz = dt / dz;
+        SWSimShader.SetFloat("dt", dt);
+        SWSimShader.SetFloat("dtdx", dtdx);
+        SWSimShader.SetFloat("dtdz", dtdz);
         for (int nt = 0; nt < step; nt++) { 
             tnow += dt;
-            dtdx = dt / dx;
-            dtdz = dt / dz;
             SWSimShader.SetFloat("tnow", tnow);
-            SWSimShader.SetFloat("dt", dt);
-            SWSimShader.SetFloat("dtdx", dtdx);
-            SWSimShader.SetFloat("dtdz", dtdz);
-            //SWSimShader.SetFloat("cmax", cmax);
 
-            //Debug.Log($"step per frame: {step}"); 
             SWSimShader.Dispatch(kernelUpdateBDX, dispatch_BDX_X, dispatch_BDX_Z, 1);
             SWSimShader.Dispatch(kernelUpdateBDZ, dispatch_BDZ_X, dispatch_BDZ_Z, 1);
             SWSimShader.Dispatch(kernelUpdateF, dispatchX, dispatchZ, 1);
@@ -97,6 +115,7 @@ public class ShallowWater_CPUSim : MonoBehaviour
             SWSimShader.Dispatch(kernelUpdateU, dispatchX, dispatchZ, 1);
             WaterMaterial.SetBuffer("eta", etaBuffer);
         }
+        //Debug.Log($"Step per frame: {step}");
     }
     
     void Setup()
@@ -393,7 +412,6 @@ public class ShallowWater_CPUSim : MonoBehaviour
         SafeRelease(ref velxBuffer);
         SafeRelease(ref velzBuffer);
         SafeRelease(ref bBuffer);
-        SafeRelease(ref etaBuffer);
         SafeRelease(ref parbxBuffer);
         SafeRelease(ref parbzBuffer);
         SafeRelease(ref fHalfBuffer);
